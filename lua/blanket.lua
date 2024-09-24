@@ -1,7 +1,7 @@
 local M = {}
 
-local xml_converter = require("converters.xml")
 local utils = require("utils")
+local xml_converter = require("converters.xml")
 
 local default_config = {
   report_path = nil,
@@ -26,22 +26,32 @@ local is_loaded = false
 local file_watcher = vim.uv.new_fs_event()
 
 ParseFile = function()
+  -- ensure that the watcher is started
   file_watcher:stop()
+  file_watcher:start(
+    M.__user_config.report_path,
+    {},
+    vim.schedule_wrap(function()
+      ParseFile()
+      M.refresh()
+    end)
+  )
+
   -- ignore any errors
-  local success, result = pcall(function()
-    local parsed = xml_converter.parse(M.__user_config.report_path)
-    M.__cached_report = parsed
+  -- local success = true
+  -- local parsed = xml_converter.parse(M.__user_config.report_path)
+  local success, parsed = pcall(function()
+    return xml_converter.parse(M.__user_config.report_path)
   end)
 
   if success then
+    assert(parsed ~= nil)
     print("jacoco parse succeeded")
+    return parsed
   else
-    print("jacoco parse didn't succeed :( trying again in a few seconds...")
-    print(result)
-    vim.fn.timer_start(1000, ParseFile)
+    print("jacoco parse didn't succeed :( " .. parsed)
+    return nil
   end
-
-  file_watcher:start(M.__user_config.report_path, {}, vim.schedule_wrap(utils.debounce(ParseFile, 1000)))
 end
 
 local register_buf_enter_ag = function()
@@ -62,6 +72,23 @@ end
 M.__cached_report = nil
 M.__user_config = {}
 
+local function update_signs(report)
+  local buf_name = vim.api.nvim_buf_get_name(0)
+  local stats = report:get(buf_name)
+  if stats then
+    utils.update_signs(
+      stats,
+      M.__user_config.signs.sign_group,
+      vim.api.nvim_get_current_buf(),
+      M.__user_config.signs.priority
+    )
+  else
+    if not M.__user_config.silent then
+      print("unable to locate stats for " .. buf_name)
+    end
+  end
+end
+
 M.refresh = function()
   if not is_loaded then
     print("please call setup")
@@ -75,23 +102,11 @@ M.refresh = function()
     return
   end
 
-  if M.__cached_report == nil then
-    ParseFile()
-  end
-
-  local buf_name = vim.api.nvim_buf_get_name(0)
-  local stats = M.__cached_report:get(buf_name)
-  if stats then
-    utils.update_signs(
-      stats,
-      M.__user_config.signs.sign_group,
-      vim.api.nvim_get_current_buf(),
-      M.__user_config.signs.priority
-    )
+  local report = ParseFile()
+  if report then
+    update_signs(report)
   else
-    if not M.__user_config.silent then
-      print("unable to locate stats for " .. buf_name)
-    end
+    vim.fn.timer_start(1000, M.refresh)
   end
 end
 
@@ -150,9 +165,9 @@ M.setup = function(config)
     M.__user_config.report_path = utils.expand_file_path(M.__user_config.report_path)
   end
 
-  if not M.__user_config.silent then
-    print(vim.inspect(M.__user_config))
-  end
+  -- if not M.__user_config.silent then
+  --   print(vim.inspect(M.__user_config))
+  -- end
 
   vim.cmd(
     string.format(
